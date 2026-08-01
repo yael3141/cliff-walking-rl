@@ -1,79 +1,109 @@
-"""
-The Cliff Walking environment, from Sutton & Barto, "Reinforcement
-Learning: An Introduction" (2nd ed.), Example 6.6.
-
-A 4x12 grid. The agent starts at the bottom-left and must reach the
-bottom-right goal. The entire bottom row between them (except the two
-endpoints) is a "cliff": stepping there gives a large negative reward and
-sends the agent back to the start. Every other step costs -1 (so the agent
-is incentivized to reach the goal quickly), and reaching the goal ends the
-episode with reward 0.
-
-This is deliberately implemented from scratch (not via gymnasium) with a
-gym-like reset()/step() interface, so the environment mechanics are fully
-transparent and testable.
-"""
+"""Generates the two key plots: (1) the reward-per-episode learning curve
+that reproduces Sutton & Barto Figure 6.4, and (2) a visualization of each
+algorithm's final greedy policy over the grid."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 
-N_ROWS = 4
-N_COLS = 12
-START = (3, 0)
-GOAL = (3, 11)
-CLIFF = {(3, c) for c in range(1, 11)}
+from environment import ACTIONS, CLIFF, GOAL, N_COLS, N_ROWS, START, CliffWalkingEnv
+from q_learning import train
 
-ACTIONS = ["up", "down", "left", "right"]
-ACTION_DELTAS = {
-    "up": (-1, 0),
-    "down": (1, 0),
-    "left": (0, -1),
-    "right": (0, 1),
-}
+ACTION_ARROWS = {"up": "↑", "down": "↓", "left": "←", "right": "→"}
 
 
-@dataclass
-class StepResult:
-    state: tuple[int, int]
-    reward: float
-    done: bool
+def _smooth(x: np.ndarray, window: int = 20) -> np.ndarray:
+    return np.convolve(x, np.ones(window) / window, mode="valid")
 
 
-class CliffWalkingEnv:
-    def __init__(self):
-        self.state = START
+def plot_learning_curves(rewards_q: np.ndarray, rewards_s: np.ndarray, out_path: str) -> None:
+    plt.figure(figsize=(9, 5))
+    plt.plot(_smooth(rewards_q), label="Q-learning (off-policy)", linewidth=1.8)
+    plt.plot(_smooth(rewards_s), label="SARSA (on-policy)", linewidth=1.8)
+    plt.ylim(-100, 0)
+    plt.xlabel("Episode")
+    plt.ylabel("Sum of rewards during episode (20-episode moving average)")
+    plt.title("Cliff Walking: Q-learning vs. SARSA\n(reproducing Sutton & Barto, Fig. 6.4)")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=130)
+    plt.close()
 
-    def reset(self) -> tuple[int, int]:
-        self.state = START
-        return self.state
 
-    def step(self, action: str) -> StepResult:
-        if action not in ACTIONS:
-            raise ValueError(f"Unknown action: {action}")
+def _rollout_path(agent) -> list[tuple[int, int]]:
+    env = CliffWalkingEnv()
+    state = env.reset()
+    path = [state]
+    for _ in range(200):
+        s = env.state_to_index(state)
+        a = int(agent.Q[s].argmax())
+        result = env.step(ACTIONS[a])
+        state = result.state
+        path.append(state)
+        if result.done:
+            break
+    return path
 
-        dr, dc = ACTION_DELTAS[action]
-        r, c = self.state
-        new_r = min(max(r + dr, 0), N_ROWS - 1)
-        new_c = min(max(c + dc, 0), N_COLS - 1)
-        new_state = (new_r, new_c)
 
-        if new_state in CLIFF:
-            self.state = START
-            return StepResult(state=self.state, reward=-100.0, done=False)
+def plot_policy_grid(agent, title: str, out_path: str) -> None:
+    fig, ax = plt.subplots(figsize=(9, 3.2))
+    grid = np.zeros((N_ROWS, N_COLS))
+    for r, c in CLIFF:
+        grid[r, c] = -1
+    grid[GOAL] = 1
+    ax.imshow(grid, cmap="Pastel1", vmin=-1, vmax=1)
 
-        self.state = new_state
-        if new_state == GOAL:
-            return StepResult(state=new_state, reward=-1.0, done=True)
+    for r in range(N_ROWS):
+        for c in range(N_COLS):
+            if (r, c) in CLIFF or (r, c) == GOAL:
+                continue
+            s = CliffWalkingEnv.state_to_index((r, c))
+            a = ACTIONS[int(agent.Q[s].argmax())]
+            ax.text(c, r, ACTION_ARROWS[a], ha="center", va="center", fontsize=11)
 
-        return StepResult(state=new_state, reward=-1.0, done=False)
+    ax.text(START[1], START[0], "S", ha="center", va="center", fontweight="bold", color="blue")
+    ax.text(GOAL[1], GOAL[0], "G", ha="center", va="center", fontweight="bold", color="green")
 
-    @staticmethod
-    def state_to_index(state: tuple[int, int]) -> int:
-        r, c = state
-        return r * N_COLS + c
+    path = _rollout_path(agent)
+    xs = [c for _, c in path]
+    ys = [r for r, _ in path]
+    ax.plot(xs, ys, color="crimson", linewidth=2, alpha=0.6)
 
-    @staticmethod
-    def n_states() -> int:
-        return N_ROWS * N_COLS
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_title(f"{title} — greedy policy (path length: {len(path)})")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=130)
+    plt.close()
+
+
+def main() -> None:
+    agent_q, rewards_q = train("q_learning", n_episodes=3000, seed=0)
+    agent_s, rewards_s = train("sarsa", n_episodes=3000, seed=0)
+
+    plot_learning_curves(rewards_q, rewards_s, "reports/learning_curves.png")
+    plot_policy_grid(agent_q, "Q-learning", "reports/policy_q_learning.png")
+    plot_policy_grid(agent_s, "SARSA", "reports/policy_sarsa.png")
+
+    import json
+
+    metrics = {
+        "n_episodes": 3000,
+        "avg_reward_last_100_episodes": {
+            "q_learning": float(rewards_q[-100:].mean()),
+            "sarsa": float(rewards_s[-100:].mean()),
+        },
+        "final_greedy_path_length": {
+            "q_learning": len(_rollout_path(agent_q)),
+            "sarsa": len(_rollout_path(agent_s)),
+        },
+    }
+    with open("reports/metrics.json", "w") as f:
+        json.dump(metrics, f, indent=2)
+    print(json.dumps(metrics, indent=2))
+
+
+if __name__ == "__main__":
+    main()
