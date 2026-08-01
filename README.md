@@ -54,7 +54,7 @@ final-policy optimality.
 ## Quickstart
 
 \`\`\`bash
-git clone https://github.com/<your-username>/cliff-walking-rl.git
+git clone https://github.com/yael3141/cliff-walking-rl.git
 cd cliff-walking-rl
 pip install -r requirements.txt
 
