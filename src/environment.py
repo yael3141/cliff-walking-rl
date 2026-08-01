@@ -1,90 +1,79 @@
 """
-Tabular Q-Learning (off-policy TD control) and SARSA (on-policy TD control),
-implemented from scratch on a shared epsilon-greedy scaffold so the *only*
-difference between the two algorithms is the one-line update rule -- which
-is exactly where their behavioral difference comes from.
+The Cliff Walking environment, from Sutton & Barto, "Reinforcement
+Learning: An Introduction" (2nd ed.), Example 6.6.
 
-Q-Learning update (off-policy -- bootstraps off the *greedy* next action,
-regardless of what the agent actually does next):
-    Q(s,a) <- Q(s,a) + alpha * [r + gamma * max_a' Q(s',a') - Q(s,a)]
+A 4x12 grid. The agent starts at the bottom-left and must reach the
+bottom-right goal. The entire bottom row between them (except the two
+endpoints) is a "cliff": stepping there gives a large negative reward and
+sends the agent back to the start. Every other step costs -1 (so the agent
+is incentivized to reach the goal quickly), and reaching the goal ends the
+episode with reward 0.
 
-SARSA update (on-policy -- bootstraps off the action the agent *actually*
-takes next, including exploration):
-    Q(s,a) <- Q(s,a) + alpha * [r + gamma * Q(s',a') - Q(s,a)]
+This is deliberately implemented from scratch (not via gymnasium) with a
+gym-like reset()/step() interface, so the environment mechanics are fully
+transparent and testable.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 
-from environment import ACTIONS, CliffWalkingEnv
+N_ROWS = 4
+N_COLS = 12
+START = (3, 0)
+GOAL = (3, 11)
+CLIFF = {(3, c) for c in range(1, 11)}
+
+ACTIONS = ["up", "down", "left", "right"]
+ACTION_DELTAS = {
+    "up": (-1, 0),
+    "down": (1, 0),
+    "left": (0, -1),
+    "right": (0, 1),
+}
 
 
 @dataclass
-class TDAgent:
-    n_states: int
-    n_actions: int = len(ACTIONS)
-    alpha: float = 0.5
-    gamma: float = 1.0
-    epsilon: float = 0.1
-    algorithm: str = "q_learning"  # "q_learning" or "sarsa"
-    rng: np.random.Generator = field(default_factory=lambda: np.random.default_rng(0))
-    Q: np.ndarray = field(init=False)
-
-    def __post_init__(self):
-        self.Q = np.zeros((self.n_states, self.n_actions))
-
-    def epsilon_greedy_action(self, state_idx: int) -> int:
-        if self.rng.random() < self.epsilon:
-            return int(self.rng.integers(self.n_actions))
-        return int(np.argmax(self.Q[state_idx]))
-
-    def update(self, s: int, a: int, r: float, s_next: int, a_next: int | None, done: bool) -> None:
-        current = self.Q[s, a]
-        if done:
-            target = r
-        elif self.algorithm == "q_learning":
-            target = r + self.gamma * np.max(self.Q[s_next])
-        elif self.algorithm == "sarsa":
-            target = r + self.gamma * self.Q[s_next, a_next]
-        else:
-            raise ValueError(f"Unknown algorithm: {self.algorithm}")
-
-        self.Q[s, a] = current + self.alpha * (target - current)
-
-    def greedy_policy(self) -> np.ndarray:
-        return np.argmax(self.Q, axis=1)
+class StepResult:
+    state: tuple[int, int]
+    reward: float
+    done: bool
 
 
-def train(algorithm: str, n_episodes: int = 3000, seed: int = 0) -> tuple[TDAgent, np.ndarray]:
-    env = CliffWalkingEnv()
-    agent = TDAgent(n_states=env.n_states(), algorithm=algorithm, rng=np.random.default_rng(seed))
+class CliffWalkingEnv:
+    def __init__(self):
+        self.state = START
 
-    episode_rewards = np.zeros(n_episodes)
+    def reset(self) -> tuple[int, int]:
+        self.state = START
+        return self.state
 
-    for ep in range(n_episodes):
-        state = env.reset()
-        s = env.state_to_index(state)
-        a = agent.epsilon_greedy_action(s)
-        total_reward = 0.0
-        done = False
+    def step(self, action: str) -> StepResult:
+        if action not in ACTIONS:
+            raise ValueError(f"Unknown action: {action}")
 
-        while not done:
-            result = env.step(ACTIONS[a])
-            s_next = env.state_to_index(result.state)
-            total_reward += result.reward
+        dr, dc = ACTION_DELTAS[action]
+        r, c = self.state
+        new_r = min(max(r + dr, 0), N_ROWS - 1)
+        new_c = min(max(c + dc, 0), N_COLS - 1)
+        new_state = (new_r, new_c)
 
-            if agent.algorithm == "sarsa" and not result.done:
-                a_next = agent.epsilon_greedy_action(s_next)
-            else:
-                a_next = agent.epsilon_greedy_action(s_next)  # needed for q_learning's next action selection too
+        if new_state in CLIFF:
+            self.state = START
+            return StepResult(state=self.state, reward=-100.0, done=False)
 
-            agent.update(s, a, result.reward, s_next, a_next, result.done)
+        self.state = new_state
+        if new_state == GOAL:
+            return StepResult(state=new_state, reward=-1.0, done=True)
 
-            s, a = s_next, a_next
-            done = result.done
+        return StepResult(state=new_state, reward=-1.0, done=False)
 
-        episode_rewards[ep] = total_reward
+    @staticmethod
+    def state_to_index(state: tuple[int, int]) -> int:
+        r, c = state
+        return r * N_COLS + c
 
-    return agent, episode_rewards
+    @staticmethod
+    def n_states() -> int:
+        return N_ROWS * N_COLS
